@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inside Node.js — V8, Event Loop &amp; libuv</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="grid-backdrop" aria-hidden="true"></div>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <span class="brand">
+      <span class="brand-mark">&lt;/&gt;</span> node<span class="brand-dim">.internals</span>
+    </span>
+    <nav class="site-nav">
+      <a href="#part1">Part 1 — Theory</a>
+      <a href="#part2">Part 2 — Practical</a>
+      <a href="#submission">Submission</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <!-- HERO -->
+  <section class="hero wrap">
+    <div class="hero-copy">
+      <p class="eyebrow">Node.js Runtime Internals — Assignment</p>
+      <h1>What actually happens<br>when your code runs?</h1>
+      <p class="hero-sub">
+        Node.js looks single-threaded and instant from the outside. Underneath,
+        four systems hand code back and forth to make asynchronous JavaScript
+        possible: the <strong>V8 engine</strong>, the <strong>Call&nbsp;Stack</strong>,
+        <strong>libuv</strong>, and the <strong>Event&nbsp;Loop</strong>. This page walks
+        through the theory, then proves it with two live demos.
+      </p>
+      <div class="hero-cta">
+        <a href="#part1" class="btn btn-primary">Start with the theory</a>
+        <a href="#part2" class="btn btn-ghost">Jump to the demos</a>
+      </div>
+    </div>
+
+    <div class="hero-diagram-wrap">
+      <svg id="engine-diagram" viewBox="0 0 520 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram of the V8 engine, Call Stack, libuv, Callback Queue and Event Loop">
+
+        <!-- connecting paths -->
+        <path id="path-stack-to-libuv" class="flow-line" d="M 160,120 C 230,80 300,80 355,110" />
+        <path id="path-libuv-to-queue" class="flow-line" d="M 430,150 C 460,210 460,270 430,310" />
+        <path id="path-queue-to-loop" class="flow-line" d="M 355,335 C 300,355 240,355 190,335" />
+        <path id="path-loop-to-stack" class="flow-line" d="M 130,300 C 90,250 90,170 130,120" />
+
+        <!-- V8 boundary -->
+        <rect x="20" y="20" width="480" height="380" rx="14" class="v8-boundary" />
+        <text x="40" y="46" class="label-eyebrow">V8 ENGINE BOUNDARY</text>
+
+        <!-- Call Stack -->
+        <g id="box-callstack">
+          <rect x="55" y="70" width="150" height="110" rx="8" class="node-box node-teal" />
+          <text x="130" y="93" class="label-title">Call Stack</text>
+          <rect x="72" y="102" width="116" height="16" rx="3" class="stack-bar" />
+          <rect x="72" y="123" width="90" height="16" rx="3" class="stack-bar" />
+          <rect x="72" y="144" width="70" height="16" rx="3" class="stack-bar" />
+          <text x="130" y="170" class="label-caption">executes JS, one line at a time</text>
+        </g>
+
+        <!-- libuv -->
+        <g id="box-libuv">
+          <rect x="345" y="90" width="140" height="90" rx="8" class="node-box node-amber" />
+          <text x="415" y="113" class="label-title">libuv</text>
+          <text x="415" y="133" class="label-caption">timers · file I/O</text>
+          <text x="415" y="149" class="label-caption">network · thread pool</text>
+        </g>
+
+        <!-- Callback Queue -->
+        <g id="box-queue">
+          <rect x="345" y="285" width="140" height="80" rx="8" class="node-box node-amber" />
+          <text x="415" y="308" class="label-title">Callback Queue</text>
+          <text x="415" y="328" class="label-caption">finished callbacks</text>
+          <text x="415" y="344" class="label-caption">wait their turn</text>
+        </g>
+
+        <!-- Event Loop -->
+        <g id="box-loop">
+          <circle cx="130" cy="300" r="55" class="node-box node-violet" />
+          <text x="130" y="296" class="label-title">Event</text>
+          <text x="130" y="314" class="label-title">Loop</text>
+          <path d="M 100,332 A 34 34 0 1 1 160 332" class="loop-arrow" />
+        </g>
+
+        <!-- moving token -->
+        <circle id="token" cx="130" cy="125" r="7" class="token" />
+      </svg>
+      <p class="diagram-caption">Press <strong>Run</strong> on either task below to watch this trace live.</p>
+    </div>
+  </section>
+
+  <!-- PART 1: THEORY -->
+  <section id="part1" class="section wrap">
+    <h2 class="section-title"><span class="section-num">Part 1</span> Theory Questions</h2>
+    <p class="section-intro">Answered in plain terms, grouped by the four systems that make Node.js run.</p>
+
+    <div class="topic-block">
+      <h3 class="topic-title"><span class="topic-dot dot-teal"></span>V8 Engine</h3>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">01</span>What is the V8 Engine?</p>
+        <p class="a">V8 is Google's open-source JavaScript engine, written in C++ and originally built to power
+        Chrome. Instead of interpreting JavaScript line by line, it compiles JS straight down to native machine
+        code before running it, which is why it's fast enough to run production servers, not just browser tabs.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">02</span>Why is the V8 Engine important for Node.js?</p>
+        <p class="a">Node.js isn't a language of its own — it's a runtime that lets JavaScript run outside a
+        browser. V8 is the part that actually understands and executes the JavaScript. Node wraps V8 with extra
+        C++ bindings (via libuv) so that code can also talk to the file system, network, and OS — things a
+        browser would never allow.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">03</span>What is the main responsibility of the V8 Engine?</p>
+        <p class="a">Parsing, compiling, and executing JavaScript, plus managing memory for it — allocating
+        memory for variables and objects as code runs, and garbage-collecting memory that's no longer in use.</p>
+      </article>
+    </div>
+
+    <div class="topic-block">
+      <h3 class="topic-title"><span class="topic-dot dot-amber"></span>Execution</h3>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">04</span>What is the difference between Synchronous and Asynchronous execution?</p>
+        <p class="a">Synchronous code runs top to bottom, and each line blocks the next until it finishes.
+        Asynchronous code lets a slow operation — a timer, a file read, a network request — start in the
+        background, while the rest of the script keeps running immediately. The result of that operation is
+        handled later, through a callback, promise, or async/await, once it's ready.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">05</span>What is the Call Stack?</p>
+        <p class="a">The Call Stack is where JavaScript keeps track of what function is currently running. It's
+        a last-in, first-out structure: every time a function is called, a new frame is pushed onto the stack;
+        when that function returns, its frame is popped off. Node can only run one thing at a time, so whatever
+        sits on top of the stack is exactly what's executing right now.</p>
+      </article>
+    </div>
+
+    <div class="topic-block">
+      <h3 class="topic-title"><span class="topic-dot dot-violet"></span>Event Loop</h3>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">06</span>What is the Event Loop?</p>
+        <p class="a">The Event Loop is the mechanism that keeps Node.js running and lets it handle asynchronous
+        work. It continuously checks: is the Call Stack empty? If yes, it looks at the pending queues (timers,
+        I/O callbacks, etc.), takes the next callback that's ready, and pushes it onto the Call Stack to run.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">07</span>Why is the Event Loop needed in Node.js?</p>
+        <p class="a">JavaScript itself runs on a single thread. Without something coordinating background tasks,
+        a slow operation like a network request would freeze the entire program until it finished. The Event
+        Loop is what allows Node to start that operation, move on to other code immediately, and come back to
+        handle the result later — giving single-threaded JavaScript the ability to feel concurrent.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">08</span>How does the Event Loop help execute asynchronous code?</p>
+        <p class="a">It acts as the traffic controller between the Call Stack and the queues that libuv fills
+        in. Once an async task (a timer firing, a file finishing reading) is ready, its callback sits in a queue.
+        The Event Loop only moves that callback onto the Call Stack once the stack is completely empty — so
+        synchronous code always finishes first, and queued callbacks run afterward, in order, one at a time.</p>
+      </article>
+    </div>
+
+    <div class="topic-block">
+      <h3 class="topic-title"><span class="topic-dot dot-teal"></span>libuv</h3>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">09</span>What is libuv?</p>
+        <p class="a">libuv is a C library that Node.js is built on top of. It provides the actual Event Loop
+        implementation, plus a thread pool, so that Node can perform operations asynchronously even though
+        JavaScript itself is single-threaded. It's the bridge between JavaScript code and the operating system's
+        async capabilities.</p>
+      </article>
+
+      <article class="qa-card">
+        <p class="q"><span class="q-num">10</span>What types of tasks are handled by libuv?</p>
+        <p class="a">Timers (setTimeout / setInterval), file system operations, DNS lookups, network I/O, and
+        child processes. Anything that can't be done instantly gets handed to libuv, which runs it in the
+        background (often on its thread pool) and only reports back to the Call Stack, through the Event Loop,
+        once the work is done.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- PART 2: PRACTICAL -->
+  <section id="part2" class="section wrap">
+    <h2 class="section-title"><span class="section-num">Part 2</span> Practical Tasks</h2>
+    <p class="section-intro">Real setTimeout timing, run live in this page. Watch the diagram above light up as each step happens.</p>
+
+    <!-- TASK 1 -->
+    <article class="task-card">
+      <div class="task-head">
+        <h3>Task 1 — Understanding Asynchronous Execution</h3>
+        <button class="btn btn-run" data-task="1">▶ Run task1.js</button>
+      </div>
+      <div class="task-body">
+        <pre class="code-block"><code><span class="tok-fn">console</span>.log(<span class="tok-str">"Start"</span>);
+
+<span class="tok-fn">setTimeout</span>(() => {
+  <span class="tok-fn">console</span>.log(<span class="tok-str">"This message appears after 2 seconds."</span>);
+}, <span class="tok-num">2000</span>);
+
+<span class="tok-fn">console</span>.log(<span class="tok-str">"End"</span>);</code></pre>
+
+        <div class="console-panel">
+          <div class="console-bar"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span><span class="console-label">output</span></div>
+          <div id="console-1" class="console-body"><span class="console-placeholder">// press run to see the real timing</span></div>
+        </div>
+      </div>
+      <div class="explain">
+        <p><strong>Why does "End" print before the delayed message?</strong> Node runs synchronous code on
+        the Call Stack first, all the way through — so <code>"Start"</code> and <code>"End"</code> execute
+        immediately, back to back. <code>setTimeout()</code> isn't handled by V8 at all; it's handed off to
+        libuv the moment it's called, which starts a real 2-second timer in the background. Only once the timer
+        finishes does libuv's result get queued, and only once the Call Stack is empty does the Event Loop move
+        that callback onto the stack to run. That's why the "End" line — written before the callback even fires
+        — always logs first.</p>
+      </div>
+    </article>
+
+    <!-- TASK 2 -->
+    <article class="task-card">
+      <div class="task-head">
+        <h3>Task 2 — Event Loop Demonstration</h3>
+        <button class="btn btn-run" data-task="2">▶ Run task2.js</button>
+      </div>
+      <div class="task-body">
+        <pre class="code-block"><code><span class="tok-fn">console</span>.log(<span class="tok-str">"Program Started"</span>);
+
+<span class="tok-fn">setTimeout</span>(() => {
+  <span class="tok-fn">console</span>.log(<span class="tok-str">"Executing Delayed Task"</span>);
+}, <span class="tok-num">0</span>);
+
+<span class="tok-fn">console</span>.log(<span class="tok-str">"Program Finished"</span>);</code></pre>
+
+        <div class="console-panel">
+          <div class="console-bar"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span><span class="console-label">output</span></div>
+          <div id="console-2" class="console-body"><span class="console-placeholder">// press run to see the real timing</span></div>
+        </div>
+      </div>
+      <div class="explain">
+        <p><strong>How the Event Loop executes this:</strong> Even with a 0ms delay, <code>setTimeout</code>
+        is still routed through libuv, not run in place. So "Program Started" and "Program Finished" — both
+        plain synchronous lines — run to completion first. Only after the Call Stack is completely clear does
+        the Event Loop check the timers phase, find the expired 0ms timer waiting, and push
+        "Executing Delayed Task" onto the stack. A delay of zero still means "after the current script
+        finishes," never "instantly."</p>
+      </div>
+    </article>
+  </section>
+
+  <!-- SUBMISSION -->
+  <section id="submission" class="section wrap submission">
+    <h2 class="section-title"><span class="section-num">Repo</span> Submission Checklist</h2>
+    <ul class="checklist">
+      <li><span class="check">✓</span> GitHub repository link</li>
+      <li><span class="check">✓</span> <code>index.html</code> with all theory answers</li>
+      <li><span class="check">✓</span> <code>task1.js</code> / <code>task2.js</code> — runnable Node scripts</li>
+      <li><span class="check">✓</span> <code>style.css</code>, <code>script.js</code> — supporting files</li>
+    </ul>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">Node.js Runtime Internals — Assignment Submission</div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
